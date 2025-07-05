@@ -240,3 +240,91 @@
     last-distribution-block: (var-get last-distribution-block)
   }
 )
+
+(define-constant ERR_INSUFFICIENT_REBATE_POINTS (err u107))
+(define-constant ERR_INVALID_REBATE_AMOUNT (err u108))
+(define-constant ERR_REBATE_DISABLED (err u109))
+
+(define-data-var rebate-rate uint u100)
+(define-data-var rebate-enabled bool true)
+(define-data-var max-rebate-discount uint u5000)
+
+(define-map user-rebate-points principal uint)
+(define-map user-rebate-history principal {earned: uint, redeemed: uint, transactions: uint})
+
+(define-read-only (get-rebate-points (user principal))
+  (default-to u0 (map-get? user-rebate-points user))
+)
+
+(define-read-only (get-rebate-history (user principal))
+  (default-to {earned: u0, redeemed: u0, transactions: u0} (map-get? user-rebate-history user))
+)
+
+(define-read-only (min (a uint) (b uint))
+  (if (<= a b) a b)
+)
+
+(define-read-only (calculate-rebate-discount (points uint) (tax-amount uint))
+  (let ((discount-rate (min (/ points u100) (var-get max-rebate-discount))))
+    (min (/ (* tax-amount discount-rate) u10000) tax-amount)
+  )
+)
+
+(define-read-only (get-rebate-rate)
+  (var-get rebate-rate)
+)
+
+(define-public (earn-rebate-points (user principal) (transaction-amount uint))
+  (let (
+    (points-to-earn (/ (* transaction-amount (var-get rebate-rate)) u10000))
+    (current-points (get-rebate-points user))
+    (current-history (get-rebate-history user))
+  )
+    (asserts! (var-get rebate-enabled) ERR_REBATE_DISABLED)
+    (asserts! (> points-to-earn u0) ERR_INVALID_REBATE_AMOUNT)
+    
+    (map-set user-rebate-points user (+ current-points points-to-earn))
+    (map-set user-rebate-history user {
+      earned: (+ (get earned current-history) points-to-earn),
+      redeemed: (get redeemed current-history),
+      transactions: (+ (get transactions current-history) u1)
+    })
+    (ok points-to-earn)
+  )
+)
+
+(define-public (redeem-rebate-points (points uint))
+  (let (
+    (current-points (get-rebate-points tx-sender))
+    (current-history (get-rebate-history tx-sender))
+  )
+    (asserts! (var-get rebate-enabled) ERR_REBATE_DISABLED)
+    (asserts! (> points u0) ERR_INVALID_REBATE_AMOUNT)
+    (asserts! (>= current-points points) ERR_INSUFFICIENT_REBATE_POINTS)
+    
+    (map-set user-rebate-points tx-sender (- current-points points))
+    (map-set user-rebate-history tx-sender {
+      earned: (get earned current-history),
+      redeemed: (+ (get redeemed current-history) points),
+      transactions: (get transactions current-history)
+    })
+    (ok points)
+  )
+)
+
+(define-public (set-rebate-rate (new-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (<= new-rate u1000) ERR_INVALID_REBATE_AMOUNT)
+    (var-set rebate-rate new-rate)
+    (ok new-rate)
+  )
+)
+
+(define-public (toggle-rebate-system)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (var-set rebate-enabled (not (var-get rebate-enabled)))
+    (ok (var-get rebate-enabled))
+  )
+)
