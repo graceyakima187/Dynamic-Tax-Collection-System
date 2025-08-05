@@ -7,6 +7,11 @@
 (define-constant ERR_INVALID_RECIPIENT (err u105))
 (define-constant ERR_DISTRIBUTION_FAILED (err u106))
 
+(define-constant ERR_INVALID_SCHEDULE_BLOCK (err u110))
+(define-constant ERR_NO_SCHEDULED_RATE (err u111))
+
+(define-data-var next-schedule-id uint u1)
+
 (define-data-var tax-rate uint u250)
 (define-data-var treasury-balance uint u0)
 (define-data-var total-collected uint u0)
@@ -326,5 +331,90 @@
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
     (var-set rebate-enabled (not (var-get rebate-enabled)))
     (ok (var-get rebate-enabled))
+  )
+)
+
+
+(define-map scheduled-rates uint {rate: uint, activation-block: uint, active: bool})
+(define-map schedule-by-block uint uint)
+
+(define-read-only (get-scheduled-rate (schedule-id uint))
+  (map-get? scheduled-rates schedule-id)
+)
+
+(define-read-only (get-next-rate-change)
+  (let ((current-block stacks-block-height))
+    (fold check-next-activation (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) none)
+  )
+)
+
+(define-read-only (check-next-activation (schedule-id uint) (current-result (optional {rate: uint, activation-block: uint})))
+  (match (map-get? scheduled-rates schedule-id)
+    schedule-data
+    (if (and (get active schedule-data) 
+             (> (get activation-block schedule-data) stacks-block-height)
+             (or (is-none current-result)
+                 (< (get activation-block schedule-data) (get activation-block (unwrap-panic current-result)))))
+      (some {rate: (get rate schedule-data), activation-block: (get activation-block schedule-data)})
+      current-result)
+    current-result
+  )
+)
+
+(define-public (schedule-tax-rate-change (new-rate uint) (activation-block uint))
+  (let ((schedule-id (var-get next-schedule-id)))
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (<= new-rate u1000) ERR_INVALID_TAX_RATE)
+    (asserts! (> activation-block stacks-block-height) ERR_INVALID_SCHEDULE_BLOCK)
+    
+    (map-set scheduled-rates schedule-id {
+      rate: new-rate,
+      activation-block: activation-block,
+      active: true
+    })
+    (map-set schedule-by-block activation-block schedule-id)
+    (var-set next-schedule-id (+ schedule-id u1))
+    (ok schedule-id)
+  )
+)
+
+(define-public (cancel-scheduled-rate (schedule-id uint))
+  (match (map-get? scheduled-rates schedule-id)
+    schedule-data
+    (begin
+      (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+      (asserts! (get active schedule-data) ERR_NO_SCHEDULED_RATE)
+      (map-set scheduled-rates schedule-id (merge schedule-data {active: false}))
+      (ok true)
+    )
+    ERR_NO_SCHEDULED_RATE
+  )
+)
+
+(define-private (check-and-apply-scheduled-rates)
+  (let ((current-block stacks-block-height))
+    (match (map-get? schedule-by-block current-block)
+      schedule-id
+      (match (map-get? scheduled-rates schedule-id)
+        schedule-data
+        (if (and (get active schedule-data) (>= current-block (get activation-block schedule-data)))
+          (begin
+            (var-set tax-rate (get rate schedule-data))
+            (map-set scheduled-rates schedule-id (merge schedule-data {active: false}))
+            true
+          )
+          true
+        )
+        true
+      )
+      true
+    )
+  )
+)
+
+(define-public (trigger-scheduled-rate-check)
+  (begin
+    (check-and-apply-scheduled-rates)
+    (ok true)
   )
 )
