@@ -27,6 +27,13 @@
 (define-data-var last-distribution-block uint u0)
 (define-data-var total-beneficiaries uint u0)
 
+(define-constant ERR_ACCOUNT_FROZEN (err u112))
+(define-constant ERR_ALREADY_FROZEN (err u113))
+(define-constant ERR_NOT_FROZEN (err u114))
+
+(define-data-var total-frozen-accounts uint u0)
+(define-data-var freeze-enabled bool true)
+
 (define-read-only (get-tax-rate)
   (var-get tax-rate)
 )
@@ -416,5 +423,82 @@
   (begin
     (check-and-apply-scheduled-rates)
     (ok true)
+  )
+)
+
+
+(define-map frozen-accounts principal {frozen: bool, freeze-block: uint, reason: (string-ascii 50)})
+(define-map freeze-history uint {account: principal, action: (string-ascii 10), block: uint, reason: (string-ascii 50)})
+(define-data-var freeze-counter uint u0)
+
+(define-read-only (is-account-frozen (account principal))
+  (match (map-get? frozen-accounts account)
+    freeze-data (get frozen freeze-data)
+    false
+  )
+)
+
+(define-read-only (get-freeze-details (account principal))
+  (map-get? frozen-accounts account)
+)
+
+(define-read-only (get-freeze-stats)
+  {
+    total-frozen: (var-get total-frozen-accounts),
+    freeze-enabled: (var-get freeze-enabled),
+    total-freeze-actions: (var-get freeze-counter)
+  }
+)
+
+(define-read-only (get-freeze-history-entry (entry-id uint))
+  (map-get? freeze-history entry-id)
+)
+
+(define-public (freeze-account (account principal) (reason (string-ascii 50)))
+  (let ((freeze-id (+ (var-get freeze-counter) u1)))
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (var-get freeze-enabled) ERR_UNAUTHORIZED)
+    (asserts! (not (is-account-frozen account)) ERR_ALREADY_FROZEN)
+    
+    (map-set frozen-accounts account {
+      frozen: true,
+      freeze-block: stacks-block-height,
+      reason: reason
+    })
+    (map-set freeze-history freeze-id {
+      account: account,
+      action: "freeze",
+      block: stacks-block-height,
+      reason: reason
+    })
+    (var-set freeze-counter freeze-id)
+    (var-set total-frozen-accounts (+ (var-get total-frozen-accounts) u1))
+    (ok true)
+  )
+)
+
+(define-public (unfreeze-account (account principal) (reason (string-ascii 50)))
+  (let ((freeze-id (+ (var-get freeze-counter) u1)))
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (is-account-frozen account) ERR_NOT_FROZEN)
+    
+    (map-delete frozen-accounts account)
+    (map-set freeze-history freeze-id {
+      account: account,
+      action: "unfreeze",
+      block: stacks-block-height,
+      reason: reason
+    })
+    (var-set freeze-counter freeze-id)
+    (var-set total-frozen-accounts (- (var-get total-frozen-accounts) u1))
+    (ok true)
+  )
+)
+
+(define-public (toggle-freeze-system)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (var-set freeze-enabled (not (var-get freeze-enabled)))
+    (ok (var-get freeze-enabled))
   )
 )
