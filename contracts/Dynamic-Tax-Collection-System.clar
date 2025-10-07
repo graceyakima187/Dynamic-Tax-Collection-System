@@ -10,6 +10,14 @@
 (define-constant ERR_INVALID_SCHEDULE_BLOCK (err u110))
 (define-constant ERR_NO_SCHEDULED_RATE (err u111))
 
+(define-constant ERR_ESCROW_NOT_FOUND (err u115))
+(define-constant ERR_ESCROW_ALREADY_CLAIMED (err u116))
+(define-constant ERR_ESCROW_NOT_EXPIRED (err u117))
+(define-constant ERR_ESCROW_EXPIRED (err u118))
+(define-constant ERR_ESCROW_UNAUTHORIZED (err u119))
+
+(define-data-var escrow-counter uint u0)
+
 (define-data-var next-schedule-id uint u1)
 
 (define-data-var tax-rate uint u250)
@@ -500,5 +508,93 @@
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
     (var-set freeze-enabled (not (var-get freeze-enabled)))
     (ok (var-get freeze-enabled))
+  )
+)
+
+(define-map escrows 
+  uint 
+  {
+    sender: principal,
+    recipient: principal,
+    amount: uint,
+    claim-deadline: uint,
+    claimed: bool,
+    cancelled: bool,
+    created-block: uint
+  }
+)
+
+(define-read-only (get-escrow-details (escrow-id uint))
+  (map-get? escrows escrow-id)
+)
+
+(define-read-only (is-escrow-active (escrow-id uint))
+  (match (map-get? escrows escrow-id)
+    escrow-data
+    (and 
+      (not (get claimed escrow-data))
+      (not (get cancelled escrow-data))
+      (< stacks-block-height (get claim-deadline escrow-data))
+    )
+    false
+  )
+)
+
+(define-public (create-escrow (recipient principal) (amount uint) (claim-deadline uint))
+  (let (
+    (escrow-id (+ (var-get escrow-counter) u1))
+    (sender-balance (get-user-balance tx-sender))
+  )
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (> claim-deadline stacks-block-height) ERR_INVALID_SCHEDULE_BLOCK)
+    (asserts! (not (is-eq tx-sender recipient)) ERR_INVALID_RECIPIENT)
+    (asserts! (>= sender-balance amount) ERR_INSUFFICIENT_BALANCE)
+    
+    (map-set user-balances tx-sender (- sender-balance amount))
+    (map-set escrows escrow-id {
+      sender: tx-sender,
+      recipient: recipient,
+      amount: amount,
+      claim-deadline: claim-deadline,
+      claimed: false,
+      cancelled: false,
+      created-block: stacks-block-height
+    })
+    (var-set escrow-counter escrow-id)
+    (ok escrow-id)
+  )
+)
+
+(define-public (claim-escrow (escrow-id uint))
+  (match (map-get? escrows escrow-id)
+    escrow-data
+    (begin
+      (asserts! (is-eq tx-sender (get recipient escrow-data)) ERR_ESCROW_UNAUTHORIZED)
+      (asserts! (not (get claimed escrow-data)) ERR_ESCROW_ALREADY_CLAIMED)
+      (asserts! (not (get cancelled escrow-data)) ERR_ESCROW_ALREADY_CLAIMED)
+      (asserts! (< stacks-block-height (get claim-deadline escrow-data)) ERR_ESCROW_EXPIRED)
+      
+      (map-set escrows escrow-id (merge escrow-data {claimed: true}))
+      (map-set user-balances tx-sender (+ (get-user-balance tx-sender) (get amount escrow-data)))
+      (ok (get amount escrow-data))
+    )
+    ERR_ESCROW_NOT_FOUND
+  )
+)
+
+(define-public (cancel-escrow (escrow-id uint))
+  (match (map-get? escrows escrow-id)
+    escrow-data
+    (begin
+      (asserts! (is-eq tx-sender (get sender escrow-data)) ERR_ESCROW_UNAUTHORIZED)
+      (asserts! (not (get claimed escrow-data)) ERR_ESCROW_ALREADY_CLAIMED)
+      (asserts! (not (get cancelled escrow-data)) ERR_ESCROW_ALREADY_CLAIMED)
+      (asserts! (>= stacks-block-height (get claim-deadline escrow-data)) ERR_ESCROW_NOT_EXPIRED)
+      
+      (map-set escrows escrow-id (merge escrow-data {cancelled: true}))
+      (map-set user-balances tx-sender (+ (get-user-balance tx-sender) (get amount escrow-data)))
+      (ok (get amount escrow-data))
+    )
+    ERR_ESCROW_NOT_FOUND
   )
 )
