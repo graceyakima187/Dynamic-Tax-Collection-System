@@ -16,6 +16,13 @@
 (define-constant ERR_ESCROW_EXPIRED (err u118))
 (define-constant ERR_ESCROW_UNAUTHORIZED (err u119))
 
+(define-constant ERR_REFUND_NOT_FOUND (err u120))
+(define-constant ERR_REFUND_ALREADY_PROCESSED (err u121))
+(define-constant ERR_REFUND_POOL_INSUFFICIENT (err u122))
+
+(define-data-var refund-pool-balance uint u0)
+(define-data-var refund-claim-counter uint u0)
+
 (define-data-var escrow-counter uint u0)
 
 (define-data-var next-schedule-id uint u1)
@@ -596,5 +603,114 @@
       (ok (get amount escrow-data))
     )
     ERR_ESCROW_NOT_FOUND
+  )
+)
+
+(define-map refund-claims 
+  uint 
+  {
+    claimant: principal,
+    amount: uint,
+    status: (string-ascii 10),
+    claim-block: uint,
+    process-block: uint
+  }
+)
+
+(define-map user-total-refunds principal uint)
+
+(define-read-only (get-refund-claim (claim-id uint))
+  (map-get? refund-claims claim-id)
+)
+
+(define-read-only (get-refund-pool-balance)
+  (var-get refund-pool-balance)
+)
+
+(define-read-only (get-user-refunds (user principal))
+  (default-to u0 (map-get? user-total-refunds user))
+)
+
+(define-public (fund-refund-pool (amount uint))
+  (let ((treasury (var-get treasury-balance)))
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (>= treasury amount) ERR_INSUFFICIENT_BALANCE)
+    
+    (var-set treasury-balance (- treasury amount))
+    (var-set refund-pool-balance (+ (var-get refund-pool-balance) amount))
+    (ok amount)
+  )
+)
+
+(define-public (submit-refund-claim (amount uint))
+  (let ((claim-id (+ (var-get refund-claim-counter) u1)))
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    
+    (map-set refund-claims claim-id {
+      claimant: tx-sender,
+      amount: amount,
+      status: "pending",
+      claim-block: stacks-block-height,
+      process-block: u0
+    })
+    (var-set refund-claim-counter claim-id)
+    (ok claim-id)
+  )
+)
+
+(define-public (approve-refund-claim (claim-id uint))
+  (match (map-get? refund-claims claim-id)
+    claim-data
+    (let ((pool-balance (var-get refund-pool-balance)))
+      (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get status claim-data) "pending") ERR_REFUND_ALREADY_PROCESSED)
+      (asserts! (>= pool-balance (get amount claim-data)) ERR_REFUND_POOL_INSUFFICIENT)
+      
+      (map-set refund-claims claim-id (merge claim-data {
+        status: "approved",
+        process-block: stacks-block-height
+      }))
+      (ok true)
+    )
+    ERR_REFUND_NOT_FOUND
+  )
+)
+
+(define-public (reject-refund-claim (claim-id uint))
+  (match (map-get? refund-claims claim-id)
+    claim-data
+    (begin
+      (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get status claim-data) "pending") ERR_REFUND_ALREADY_PROCESSED)
+      
+      (map-set refund-claims claim-id (merge claim-data {
+        status: "rejected",
+        process-block: stacks-block-height
+      }))
+      (ok true)
+    )
+    ERR_REFUND_NOT_FOUND
+  )
+)
+
+(define-public (withdraw-approved-refund (claim-id uint))
+  (match (map-get? refund-claims claim-id)
+    claim-data
+    (let (
+      (pool-balance (var-get refund-pool-balance))
+      (refund-amount (get amount claim-data))
+    )
+      (asserts! (is-eq tx-sender (get claimant claim-data)) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get status claim-data) "approved") ERR_REFUND_ALREADY_PROCESSED)
+      (asserts! (>= pool-balance refund-amount) ERR_REFUND_POOL_INSUFFICIENT)
+      
+      (var-set refund-pool-balance (- pool-balance refund-amount))
+      (map-set refund-claims claim-id (merge claim-data {status: "claimed"}))
+      (map-set user-total-refunds tx-sender (+ (get-user-refunds tx-sender) refund-amount))
+      (try! (as-contract (stx-transfer? refund-amount tx-sender tx-sender)))
+      (ok refund-amount)
+    )
+    ERR_REFUND_NOT_FOUND
   )
 )
